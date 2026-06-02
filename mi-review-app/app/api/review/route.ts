@@ -1,5 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest } from "next/server";
+
+export const runtime = "edge";
 
 const SYSTEM_PROMPT = `Eres un metodólogo experto en revisiones sistemáticas conforme a PRISMA 2020.
 
@@ -86,14 +87,13 @@ Al final ofrece: *"¿Quieres que profundice en algún estudio, outcome o secció
 export async function POST(req: NextRequest) {
   const { topic, messages } = await req.json();
 
-  if (!process.env.ANTHROPIC_API_KEY) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
     return new Response(
       JSON.stringify({ error: "ANTHROPIC_API_KEY no configurada" }),
       { status: 500 }
     );
   }
-
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   const conversationMessages =
     messages && messages.length > 0
@@ -105,22 +105,55 @@ export async function POST(req: NextRequest) {
           },
         ];
 
-  const stream = await client.messages.stream({
-    model: "claude-opus-4-6",
-    max_tokens: 8000,
-    system: SYSTEM_PROMPT,
-    messages: conversationMessages,
+  const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 8000,
+      stream: true,
+      system: SYSTEM_PROMPT,
+      messages: conversationMessages,
+    }),
   });
 
+  if (!anthropicRes.ok) {
+    const err = await anthropicRes.text();
+    return new Response(JSON.stringify({ error: err }), { status: 500 });
+  }
+
+  // Forward the SSE stream, extracting only text deltas
   const encoder = new TextEncoder();
   const readable = new ReadableStream({
     async start(controller) {
-      for await (const chunk of stream) {
-        if (
-          chunk.type === "content_block_delta" &&
-          chunk.delta.type === "text_delta"
-        ) {
-          controller.enqueue(encoder.encode(chunk.delta.text));
+      const reader = anthropicRes.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (data === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(data);
+            if (
+              parsed.type === "content_block_delta" &&
+              parsed.delta?.type === "text_delta"
+            ) {
+              controller.enqueue(encoder.encode(parsed.delta.text));
+            }
+          } catch {}
         }
       }
       controller.close();
