@@ -89,21 +89,8 @@ export async function POST(req: NextRequest) {
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return new Response(
-      JSON.stringify({ error: "ANTHROPIC_API_KEY no configurada" }),
-      { status: 500 }
-    );
+    return new Response(JSON.stringify({ error: "Sin API key" }), { status: 500 });
   }
-
-  const conversationMessages =
-    messages && messages.length > 0
-      ? messages
-      : [
-          {
-            role: "user",
-            content: `Realiza una revisión sistemática PRISMA 2020 completa sobre: ${topic}`,
-          },
-        ];
 
   const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -114,53 +101,14 @@ export async function POST(req: NextRequest) {
     },
     body: JSON.stringify({
       model: "claude-3-5-sonnet-20241022",
-      max_tokens: 8000,
-      stream: true,
-      system: SYSTEM_PROMPT,
-      messages: conversationMessages,
+      max_tokens: 100,
+      messages: [{ role: "user", content: "Di hola" }],
     }),
   });
 
-  if (!anthropicRes.ok) {
-    const err = await anthropicRes.text();
-    return new Response(JSON.stringify({ error: err }), { status: 500 });
-  }
-
-  // Forward the SSE stream, extracting only text deltas
-  const encoder = new TextEncoder();
-  const readable = new ReadableStream({
-    async start(controller) {
-      const reader = anthropicRes.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6).trim();
-          if (data === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(data);
-            if (
-              parsed.type === "content_block_delta" &&
-              parsed.delta?.type === "text_delta"
-            ) {
-              controller.enqueue(encoder.encode(parsed.delta.text));
-            }
-          } catch {}
-        }
-      }
-      controller.close();
-    },
-  });
-
-  return new Response(readable, {
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  const body = await anthropicRes.text();
+  return new Response(JSON.stringify({ status: anthropicRes.status, body }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
   });
 }
